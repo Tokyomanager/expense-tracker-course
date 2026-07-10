@@ -1,10 +1,15 @@
 "use client";
 
 import {
-  ArrowDownToLine,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  Download,
   Edit3,
+  FileJson,
+  FileSpreadsheet,
+  FileText,
+  Loader2,
   PieChart,
   Plus,
   Search,
@@ -47,6 +52,16 @@ type Filters = {
   endDate: string;
 };
 
+type ExportFormat = "csv" | "json" | "pdf";
+
+type ExportOptions = {
+  format: ExportFormat;
+  startDate: string;
+  endDate: string;
+  categories: Set<Category>;
+  filename: string;
+};
+
 const STORAGE_KEY = "course-expense-tracker-expenses";
 const currency = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -72,7 +87,10 @@ const initialFilters: Filters = {
 const categoryStyles: Record<Category, { badge: string; bar: string }> = {
   Food: { badge: "bg-emerald-50 text-emerald-700", bar: "bg-emerald-500" },
   Transportation: { badge: "bg-sky-50 text-sky-700", bar: "bg-sky-500" },
-  Entertainment: { badge: "bg-violet-50 text-violet-700", bar: "bg-violet-500" },
+  Entertainment: {
+    badge: "bg-violet-50 text-violet-700",
+    bar: "bg-violet-500",
+  },
   Shopping: { badge: "bg-rose-50 text-rose-700", bar: "bg-rose-500" },
   Bills: { badge: "bg-amber-50 text-amber-700", bar: "bg-amber-500" },
   Other: { badge: "bg-slate-100 text-slate-700", bar: "bg-slate-500" },
@@ -135,6 +153,116 @@ function parseStoredExpenses(value: string | null): Expense[] | null {
   }
 }
 
+function applyExportFilters(expenses: Expense[], opts: ExportOptions): Expense[] {
+  return expenses
+    .filter((e) => {
+      const matchesCategory = opts.categories.size === 0 || opts.categories.has(e.category);
+      const matchesStart = !opts.startDate || e.date >= opts.startDate;
+      const matchesEnd = !opts.endDate || e.date <= opts.endDate;
+      return matchesCategory && matchesStart && matchesEnd;
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function downloadBlob(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportToCsv(rows: Expense[], filename: string) {
+  const header = ["Date", "Category", "Amount", "Description"];
+  const lines = [
+    header,
+    ...rows.map((e) => [
+      e.date,
+      e.category,
+      e.amount.toFixed(2),
+      e.description,
+    ]),
+  ].map((row) =>
+    row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","),
+  );
+  downloadBlob(lines.join("\n"), `${filename}.csv`, "text/csv;charset=utf-8");
+}
+
+function exportToJson(rows: Expense[], filename: string) {
+  const data = rows.map((e) => ({
+    date: e.date,
+    category: e.category,
+    amount: e.amount,
+    description: e.description,
+  }));
+  downloadBlob(
+    JSON.stringify({ exportedAt: new Date().toISOString(), expenses: data }, null, 2),
+    `${filename}.json`,
+    "application/json",
+  );
+}
+
+function exportToPdf(rows: Expense[], filename: string) {
+  const total = rows.reduce((s, e) => s + e.amount, 0);
+  const tableRows = rows
+    .map(
+      (e) => `
+      <tr>
+        <td>${e.date}</td>
+        <td>${e.category}</td>
+        <td style="text-align:right">${currency.format(e.amount)}</td>
+        <td>${e.description}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>${filename}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; color: #0f172a; padding: 2rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .meta { color: #64748b; font-size: 0.875rem; margin-bottom: 1.5rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th { text-align: left; border-bottom: 2px solid #e2e8f0; padding: 0.5rem 0.75rem; color: #475569; }
+    td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f1f5f9; }
+    tr:last-child td { border-bottom: none; }
+    .total-row td { font-weight: 600; border-top: 2px solid #e2e8f0; padding-top: 0.75rem; }
+    @media print { body { padding: 0; } }
+  </style>
+</head>
+<body>
+  <h1>Expense Report</h1>
+  <p class="meta">Exported ${new Date().toLocaleString()} &bull; ${rows.length} records &bull; Total: ${currency.format(total)}</p>
+  <table>
+    <thead>
+      <tr><th>Date</th><th>Category</th><th>Amount</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      ${tableRows}
+      <tr class="total-row">
+        <td colspan="2">Total</td>
+        <td style="text-align:right">${currency.format(total)}</td>
+        <td></td>
+      </tr>
+    </tbody>
+  </table>
+  <script>window.onload = () => { window.print(); }<\/script>
+</body>
+</html>`;
+
+  const win = window.open("", "_blank");
+  if (win) {
+    win.document.write(html);
+    win.document.title = filename;
+    win.document.close();
+  }
+}
+
 export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [draft, setDraft] = useState<ExpenseDraft>(emptyDraft);
@@ -144,6 +272,7 @@ export default function Home() {
   const [storageError, setStorageError] = useState("");
   const [toast, setToast] = useState("");
   const [isReady, setIsReady] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     const storedExpenses = parseStoredExpenses(localStorage.getItem(STORAGE_KEY));
@@ -280,34 +409,6 @@ export default function Home() {
     }
   };
 
-  const exportCsv = () => {
-    const rows = [
-      ["Date", "Description", "Category", "Amount"],
-      ...filteredExpenses.map((expense) => [
-        expense.date,
-        expense.description,
-        expense.category,
-        expense.amount.toFixed(2),
-      ]),
-    ];
-    const csv = rows
-      .map((row) =>
-        row
-          .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
-          .join(","),
-      )
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = "expenses.csv";
-    link.click();
-    URL.revokeObjectURL(url);
-    setToast("CSV export ready");
-  };
-
   const resetForm = () => {
     setDraft(emptyDraft());
     setEditingId(null);
@@ -326,18 +427,19 @@ export default function Home() {
               Expense Tracker
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Track everyday spending, review monthly totals, and export a clean
-              CSV from the same dashboard.
+              Track everyday spending, review monthly totals, and export your
+              data in the format you need.
             </p>
           </div>
           <button
             type="button"
-            onClick={exportCsv}
-            disabled={!filteredExpenses.length}
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            onClick={() => setExportOpen(true)}
+            disabled={!expenses.length}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-slate-950 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
-            <ArrowDownToLine size={18} />
-            Export CSV
+            <Download size={18} />
+            Export Data
+            <ChevronDown size={15} className="opacity-60" />
           </button>
         </header>
 
@@ -710,7 +812,321 @@ export default function Home() {
           </>
         )}
       </div>
+
+      {exportOpen && (
+        <ExportModal
+          expenses={expenses}
+          onClose={() => setExportOpen(false)}
+          onExported={(msg) => {
+            setToast(msg);
+            setExportOpen(false);
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+function ExportModal({
+  expenses,
+  onClose,
+  onExported,
+}: {
+  expenses: Expense[];
+  onClose: () => void;
+  onExported: (msg: string) => void;
+}) {
+  const defaultFilename = `expenses-${today()}`;
+  const [opts, setOpts] = useState<ExportOptions>({
+    format: "csv",
+    startDate: "",
+    endDate: "",
+    categories: new Set<Category>(),
+    filename: defaultFilename,
+  });
+  const [loading, setLoading] = useState(false);
+
+  const previewRows = useMemo(() => applyExportFilters(expenses, opts), [expenses, opts]);
+  const previewTotal = useMemo(
+    () => previewRows.reduce((s, e) => s + e.amount, 0),
+    [previewRows],
+  );
+
+  const toggleCategory = (cat: Category) => {
+    setOpts((prev) => {
+      const next = new Set(prev.categories);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return { ...prev, categories: next };
+    });
+  };
+
+  const allCategoriesSelected = opts.categories.size === 0;
+
+  const handleExport = async () => {
+    if (!previewRows.length) return;
+    setLoading(true);
+    await new Promise((r) => setTimeout(r, 400));
+
+    const name = opts.filename.trim() || defaultFilename;
+
+    if (opts.format === "csv") exportToCsv(previewRows, name);
+    else if (opts.format === "json") exportToJson(previewRows, name);
+    else exportToPdf(previewRows, name);
+
+    setLoading(false);
+    onExported(
+      opts.format === "pdf"
+        ? "PDF report opened — use Print → Save as PDF"
+        : `${opts.format.toUpperCase()} exported (${previewRows.length} records)`,
+    );
+  };
+
+  const formatIcons: Record<ExportFormat, React.ReactNode> = {
+    csv: <FileSpreadsheet size={16} />,
+    json: <FileJson size={16} />,
+    pdf: <FileText size={16} />,
+  };
+
+  const formatLabels: Record<ExportFormat, string> = {
+    csv: "CSV",
+    json: "JSON",
+    pdf: "PDF",
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
+      <div
+        className="absolute inset-0 bg-slate-950/40 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-t-2xl bg-white shadow-2xl sm:rounded-2xl max-h-[92vh] overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-950">Export Data</h2>
+            <p className="text-sm text-slate-500">
+              Choose format, filters, and filename
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-500 transition hover:bg-slate-50 hover:text-slate-900"
+          >
+            <X size={17} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-6 py-5 space-y-6">
+          {/* Format selector */}
+          <div>
+            <p className="text-sm font-medium text-slate-700 mb-2">Format</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(["csv", "json", "pdf"] as ExportFormat[]).map((fmt) => (
+                <button
+                  key={fmt}
+                  type="button"
+                  onClick={() => setOpts((p) => ({ ...p, format: fmt }))}
+                  className={`flex items-center justify-center gap-2 rounded-lg border py-3 text-sm font-semibold transition ${
+                    opts.format === fmt
+                      ? "border-slate-950 bg-slate-950 text-white"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  {formatIcons[fmt]}
+                  {formatLabels[fmt]}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              {opts.format === "csv" && "Spreadsheet-compatible comma-separated values"}
+              {opts.format === "json" && "Machine-readable JSON with metadata envelope"}
+              {opts.format === "pdf" && "Formatted report — browser Print → Save as PDF"}
+            </p>
+          </div>
+
+          {/* Date range */}
+          <div>
+            <p className="text-sm font-medium text-slate-700 mb-2">Date range</p>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                From
+                <input
+                  type="date"
+                  value={opts.startDate}
+                  onChange={(e) =>
+                    setOpts((p) => ({ ...p, startDate: e.target.value }))
+                  }
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                />
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                To
+                <input
+                  type="date"
+                  value={opts.endDate}
+                  onChange={(e) =>
+                    setOpts((p) => ({ ...p, endDate: e.target.value }))
+                  }
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* Category filter */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium text-slate-700">Categories</p>
+              <button
+                type="button"
+                onClick={() => setOpts((p) => ({ ...p, categories: new Set() }))}
+                className="text-xs text-slate-500 hover:text-slate-900 transition"
+              >
+                {allCategoriesSelected ? "All selected" : "Select all"}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {categories.map((cat) => {
+                const active = allCategoriesSelected || opts.categories.has(cat);
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => toggleCategory(cat)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                      active
+                        ? categoryStyles[cat].badge + " ring-1 ring-inset ring-current/20"
+                        : "bg-slate-100 text-slate-400 hover:bg-slate-200"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Filename */}
+          <div>
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Filename
+              <div className="flex items-center gap-0">
+                <input
+                  type="text"
+                  value={opts.filename}
+                  onChange={(e) =>
+                    setOpts((p) => ({ ...p, filename: e.target.value }))
+                  }
+                  placeholder={defaultFilename}
+                  className="h-10 flex-1 rounded-l-md border border-r-0 border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none transition focus:border-slate-950 focus:ring-4 focus:ring-slate-100"
+                />
+                <span className="inline-flex h-10 items-center rounded-r-md border border-slate-300 bg-slate-50 px-3 text-sm text-slate-500">
+                  .{opts.format === "pdf" ? "pdf" : opts.format}
+                </span>
+              </div>
+            </label>
+          </div>
+
+          {/* Summary */}
+          <div className={`rounded-lg border px-4 py-3 ${previewRows.length ? "border-slate-200 bg-slate-50" : "border-amber-200 bg-amber-50"}`}>
+            <div className="flex items-center justify-between text-sm">
+              <span className={`font-medium ${previewRows.length ? "text-slate-700" : "text-amber-700"}`}>
+                {previewRows.length
+                  ? `${previewRows.length} record${previewRows.length !== 1 ? "s" : ""} will be exported`
+                  : "No records match the current filters"}
+              </span>
+              {previewRows.length > 0 && (
+                <span className="font-semibold text-slate-950">
+                  {currency.format(previewTotal)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Preview table */}
+          {previewRows.length > 0 && (
+            <div>
+              <p className="text-sm font-medium text-slate-700 mb-2">
+                Preview
+                {previewRows.length > 5 && (
+                  <span className="ml-1.5 text-slate-400 font-normal">
+                    (first 5 of {previewRows.length})
+                  </span>
+                )}
+              </p>
+              <div className="overflow-x-auto rounded-lg border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <th className="px-4 py-2.5">Date</th>
+                      <th className="px-4 py-2.5">Category</th>
+                      <th className="px-4 py-2.5 text-right">Amount</th>
+                      <th className="px-4 py-2.5">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {previewRows.slice(0, 5).map((e) => (
+                      <tr key={e.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2.5 text-slate-600 whitespace-nowrap">
+                          {formatDate(e.date)}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${categoryStyles[e.category].badge}`}>
+                            {e.category}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-slate-950 whitespace-nowrap">
+                          {currency.format(e.amount)}
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-700 max-w-[180px] truncate">
+                          {e.description}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {previewRows.length > 5 && (
+                  <div className="border-t border-slate-100 px-4 py-2.5 text-xs text-slate-400 bg-slate-50">
+                    + {previewRows.length - 5} more rows
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-10 items-center justify-center rounded-md border border-slate-200 px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={loading || !previewRows.length}
+            className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            {loading ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Preparing…
+              </>
+            ) : (
+              <>
+                <Download size={16} />
+                Export {formatLabels[opts.format]}
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
