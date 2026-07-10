@@ -282,12 +282,12 @@ export default function Home() {
 
   const exportCsv = () => {
     const rows = [
-      ["Date", "Description", "Category", "Amount"],
-      ...filteredExpenses.map((expense) => [
+      ["Date", "Category", "Amount", "Description"],
+      ...expenses.map((expense) => [
         expense.date,
-        expense.description,
         expense.category,
         expense.amount.toFixed(2),
+        expense.description,
       ]),
     ];
     const csv = rows
